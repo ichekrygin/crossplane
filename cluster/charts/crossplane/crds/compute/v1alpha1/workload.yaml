@@ -91,31 +91,100 @@ spec:
                 - secretName
                 type: object
               type: array
-            targetDeployment:
-              type: object
+            targetClusterRoleBindings:
+              items:
+                type: object
+              type: array
+            targetClusterRoles:
+              items:
+                type: object
+              type: array
+            targetCrds:
+              items:
+                type: object
+              type: array
+            targetCrs:
+              items:
+                type: object
+              type: array
+            targetDeployments:
+              items:
+                type: object
+              type: array
             targetNamespace:
               type: string
-            targetService:
-              type: object
+            targetRoleBindings:
+              items:
+                type: object
+              type: array
+            targetRoles:
+              items:
+                type: object
+              type: array
+            targetServiceAccounts:
+              items:
+                type: object
+              type: array
+            targetServices:
+              items:
+                type: object
+              type: array
           required:
           - targetNamespace
-          - targetDeployment
-          - targetService
           type: object
         status:
           properties:
             clusterRef:
               type: object
-            deployment:
-              type: object
-            deploymentRef:
-              type: object
-            service:
-              type: object
-            serviceRef:
-              type: object
             state:
               type: string
+            targetReferences:
+              properties:
+                clusterRoleBindings:
+                  items:
+                    type: object
+                  type: array
+                clusterRoles:
+                  items:
+                    type: object
+                  type: array
+                crds:
+                  description: CRDs
+                  items:
+                    type: object
+                  type: array
+                crs:
+                  items:
+                    type: object
+                  type: array
+                deployments:
+                  items:
+                    type: object
+                  type: array
+                serviceAccounts:
+                  items:
+                    type: object
+                  type: array
+                services:
+                  items:
+                    type: object
+                  type: array
+              type: object
+            targetStatuses:
+              properties:
+                crds:
+                  items:
+                    type: object
+                  type: array
+                deployments:
+                  items:
+                    type: object
+                  type: array
+                services:
+                  items:
+                    type: object
+                  type: array
+              type: object
           type: object
   version: v1alpha1
 status:

@@ -21,12 +21,18 @@ import (
 	"fmt"
 	"net/url"
 
+	"github.com/pkg/errors"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/api/rbac/v1beta1"
+	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -54,6 +60,14 @@ const (
 	errorDeleting      = "Failed to delete"
 
 	workloadReferenceLabelKey = "workloadRef"
+
+	// supported kinds
+	kindCrd                = "customresourcedefinitions"
+	kindSA                 = "serviceaccounts"
+	kindClusterRole        = "clusterroles"
+	kindClusterRoleBinding = "clusterrolebindings"
+	kindDeployment         = "deployments"
+	kindService            = "services"
 )
 
 var (
@@ -76,24 +90,36 @@ type Reconciler struct {
 	kubeclient kubernetes.Interface
 	recorder   record.EventRecorder
 
-	connect func(*computev1alpha1.Workload) (kubernetes.Interface, error)
-	create  func(*computev1alpha1.Workload, kubernetes.Interface) (reconcile.Result, error)
-	sync    func(*computev1alpha1.Workload, kubernetes.Interface) (reconcile.Result, error)
-	delete  func(*computev1alpha1.Workload, kubernetes.Interface) (reconcile.Result, error)
+	connect func(*computev1alpha1.Workload) (client.Client, error)
+	create  func(*computev1alpha1.Workload, client.Client) (reconcile.Result, error)
+	sync    func(*computev1alpha1.Workload, client.Client) (reconcile.Result, error)
+	delete  func(*computev1alpha1.Workload, client.Client) (reconcile.Result, error)
 
-	propagateDeployment func(kubernetes.Interface, *appsv1.Deployment, string, string) (*appsv1.Deployment, error)
-	propagateService    func(kubernetes.Interface, *corev1.Service, string, string) (*corev1.Service, error)
+	propagate                    func(client.Client, runtime.Object, string, string) error
+	propagateCRs                 func(client.Client, []unstructured.Unstructured, string, string) ([]corev1.ObjectReference, error)
+	propagateCRDs                func(client.Client, []apiextensions.CustomResourceDefinition, string, string) ([]corev1.ObjectReference, error)
+	propagateServiceAccounts     func(client.Client, []corev1.ServiceAccount, string, string) ([]corev1.ObjectReference, error)
+	propagateClusterRoles        func(client.Client, []v1beta1.ClusterRole, string, string) ([]corev1.ObjectReference, error)
+	propagateClusterRoleBindings func(client.Client, []v1beta1.ClusterRoleBinding, string, string) ([]corev1.ObjectReference, error)
+	propagateDeployments         func(client.Client, []appsv1.Deployment, string, string) ([]corev1.ObjectReference, error)
+	propagateServices            func(client.Client, []corev1.Service, string, string) ([]corev1.ObjectReference, error)
 }
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 	r := &Reconciler{
-		Client:              mgr.GetClient(),
-		scheme:              mgr.GetScheme(),
-		kubeclient:          kubernetes.NewForConfigOrDie(mgr.GetConfig()),
-		recorder:            mgr.GetRecorder(controllerName),
-		propagateDeployment: propagateDeployment,
-		propagateService:    propagateService,
+		Client:                       mgr.GetClient(),
+		scheme:                       mgr.GetScheme(),
+		kubeclient:                   kubernetes.NewForConfigOrDie(mgr.GetConfig()),
+		recorder:                     mgr.GetRecorder(controllerName),
+		propagate:                    propagate,
+		propagateCRs:                 propagateCRs,
+		propagateCRDs:                propagateCRDs,
+		propagateServiceAccounts:     propagateServiceAccounts,
+		propagateClusterRoles:        propagateClusterRoles,
+		propagateClusterRoleBindings: propagateClusterRoleBindings,
+		propagateDeployments:         propagateDeployments,
+		propagateServices:            propagateServices,
 	}
 	r.connect = r._connect
 	r.create = r._create
@@ -136,7 +162,7 @@ func (r *Reconciler) fail(instance *computev1alpha1.Workload, reason, msg string
 }
 
 // _connect establish connection to the target cluster
-func (r *Reconciler) _connect(instance *computev1alpha1.Workload) (kubernetes.Interface, error) {
+func (r *Reconciler) _connect(instance *computev1alpha1.Workload) (client.Client, error) {
 	ref := instance.Status.Cluster
 	if ref == nil {
 		return nil, fmt.Errorf("workload is not scheduled")
@@ -185,97 +211,185 @@ func (r *Reconciler) _connect(instance *computev1alpha1.Workload) (kubernetes.In
 		},
 		BearerToken: string(token),
 	}
-
-	return kubernetes.NewForConfig(config)
+	apiextensions.SchemeBuilder.AddToScheme(scheme.Scheme)
+	return client.New(config, client.Options{Scheme: scheme.Scheme})
 }
 
-func addWorkloadReferenceLabel(m *metav1.ObjectMeta, uid string) {
-	if m.Labels == nil {
-		m.Labels = make(map[string]string)
+func addWorkloadReferenceLabel(m metav1.Object, uid string) {
+	labels := m.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
 	}
-	m.Labels[workloadReferenceLabelKey] = uid
+	labels[workloadReferenceLabelKey] = uid
+	m.SetLabels(labels)
 }
 
-func getWorkloadReferenceLabel(m metav1.ObjectMeta) string {
-	if m.Labels == nil {
-		return ""
+func getWorkloadReferenceLabel(m metav1.Object) string {
+	labels := m.GetLabels()
+	if len(labels) > 0 {
+		return labels[workloadReferenceLabelKey]
 	}
-	return m.Labels[workloadReferenceLabelKey]
+	return ""
 }
 
-// propagateDeployment to the target cluster
-func propagateDeployment(k kubernetes.Interface, d *appsv1.Deployment, ns, uid string) (*appsv1.Deployment, error) {
-	// Update deployment selector - typically selector value is not provided and if it is not
-	// matching template the deployment create operation will fail
-	if d.Spec.Selector == nil {
-		d.Spec.Selector = &metav1.LabelSelector{}
+func propagate(c client.Client, o runtime.Object, ns, uid string) error {
+	mo, ok := o.(metav1.Object)
+	if !ok {
+		return fmt.Errorf("not valid runtime.Object: %T", o)
 	}
-	d.Spec.Selector.MatchLabels = d.Spec.Template.Labels
+	mo.SetNamespace(util.IfEmptyString(mo.GetNamespace(), ns))
 
-	// If deployment namespace value is not provided - default it to the workload target namespace
-	d.Namespace = util.IfEmptyString(d.Namespace, ns)
+	addWorkloadReferenceLabel(mo, uid)
 
-	addWorkloadReferenceLabel(&d.ObjectMeta, uid)
+	if err := c.Create(ctx, o); err != nil {
+		if kerrors.IsAlreadyExists(err) {
+			if getWorkloadReferenceLabel(mo) == uid {
+				//return c.Update(ctx, o)
+				return nil
+			}
+		}
+		return err
+	}
+	return nil
+}
 
-	// Check if target deployment already exists on the target cluster
-	dd, err := k.AppsV1().Deployments(d.Namespace).Get(d.Name, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			dd = nil
-		} else {
+func propagateCRs(c client.Client, crs []unstructured.Unstructured, ns, uid string) ([]corev1.ObjectReference, error) {
+	var refs []corev1.ObjectReference
+
+	for _, i := range crs {
+		if err := propagate(c, &i, ns, uid); err != nil {
 			return nil, err
 		}
+		ref := corev1.ObjectReference{
+			Kind:            i.GetKind(),
+			APIVersion:      i.GetAPIVersion(),
+			Namespace:       i.GetNamespace(),
+			Name:            i.GetName(),
+			UID:             i.GetUID(),
+			ResourceVersion: i.GetResourceVersion(),
+		}
+		refs = append([]corev1.ObjectReference{ref}, refs...)
 	}
-
-	if dd == nil {
-		return k.AppsV1().Deployments(d.Namespace).Create(d)
-	}
-
-	if getWorkloadReferenceLabel(dd.ObjectMeta) == uid {
-		return k.AppsV1().Deployments(d.Namespace).Update(d)
-	}
-
-	return nil, fmt.Errorf("cannot propagate, deployment %s/%s already exists", d.Namespace, d.Name)
+	return refs, nil
 }
 
-// propagateService to the target cluster
-func propagateService(k kubernetes.Interface, s *corev1.Service, ns, uid string) (*corev1.Service, error) {
-	// If service namespace vlaue is not provided - default it to the workload target namespace
-	s.Namespace = util.IfEmptyString(s.Namespace, ns)
+func propagateCRDs(c client.Client, list []apiextensions.CustomResourceDefinition, ns, uid string) ([]corev1.ObjectReference, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
 
-	addWorkloadReferenceLabel(&s.ObjectMeta, uid)
+	var refs []corev1.ObjectReference
 
-	// check if service already exists
-	ss, err := k.CoreV1().Services(s.Namespace).Get(s.Name, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			ss = nil
-		} else {
+	for _, i := range list {
+		if err := propagate(c, &i, ns, uid); err != nil {
 			return nil, err
 		}
+		refs = append([]corev1.ObjectReference{
+			newObjectReference(i.TypeMeta, i.ObjectMeta, kindCrd, apiextensions.SchemeGroupVersion.String())}, refs...)
+	}
+	return refs, nil
+}
+
+func propagateServiceAccounts(c client.Client, list []corev1.ServiceAccount, ns, uid string) ([]corev1.ObjectReference, error) {
+	if len(list) == 0 {
+		return nil, nil
 	}
 
-	if ss == nil {
-		return k.CoreV1().Services(s.Namespace).Create(s)
+	var refs []corev1.ObjectReference
+
+	for _, i := range list {
+		if err := propagate(c, &i, ns, uid); err != nil {
+			return nil, err
+		}
+		refs = append([]corev1.ObjectReference{
+			newObjectReference(i.TypeMeta, i.ObjectMeta, kindSA, corev1.SchemeGroupVersion.String())}, refs...)
+	}
+	return refs, nil
+}
+
+func propagateClusterRoles(c client.Client, list []v1beta1.ClusterRole, ns, uid string) ([]corev1.ObjectReference, error) {
+	if len(list) == 0 {
+		return nil, nil
 	}
 
-	if getWorkloadReferenceLabel(ss.ObjectMeta) == uid {
-		return k.CoreV1().Services(s.Namespace).Update(s)
+	var refs []corev1.ObjectReference
+
+	for _, i := range list {
+		if err := propagate(c, &i, ns, uid); err != nil {
+			return nil, err
+		}
+		refs = append([]corev1.ObjectReference{
+			newObjectReference(i.TypeMeta, i.ObjectMeta, kindClusterRole, v1beta1.SchemeGroupVersion.String())}, refs...)
+	}
+	return refs, nil
+}
+
+func propagateClusterRoleBindings(c client.Client, list []v1beta1.ClusterRoleBinding, ns, uid string) ([]corev1.ObjectReference, error) {
+	if len(list) == 0 {
+		return nil, nil
 	}
 
-	return nil, fmt.Errorf("cannot propagate, service %s/%s already exists", s.Namespace, s.Name)
+	var refs []corev1.ObjectReference
+
+	for _, i := range list {
+		if err := propagate(c, &i, ns, uid); err != nil {
+			return nil, err
+		}
+		refs = append([]corev1.ObjectReference{
+			newObjectReference(i.TypeMeta, i.ObjectMeta, kindClusterRoleBinding, v1beta1.SchemeGroupVersion.String())}, refs...)
+	}
+	return refs, nil
+}
+
+func propagateDeployments(c client.Client, list []appsv1.Deployment, ns, uid string) ([]corev1.ObjectReference, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+
+	var refs []corev1.ObjectReference
+
+	for _, i := range list {
+		if err := propagate(c, &i, ns, uid); err != nil {
+			return nil, err
+		}
+		refs = append([]corev1.ObjectReference{
+			newObjectReference(i.TypeMeta, i.ObjectMeta, kindDeployment, appsv1.SchemeGroupVersion.String())}, refs...)
+	}
+	return refs, nil
+}
+
+func propagateServices(c client.Client, list []corev1.Service, ns, uid string) ([]corev1.ObjectReference, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+
+	var refs []corev1.ObjectReference
+
+	for _, i := range list {
+		if err := propagate(c, &i, ns, uid); err != nil {
+			return nil, err
+		}
+		refs = append([]corev1.ObjectReference{
+			newObjectReference(i.TypeMeta, i.ObjectMeta, kindService, corev1.SchemeGroupVersion.String())}, refs...)
+	}
+	return refs, nil
 }
 
 // _create workload
-func (r *Reconciler) _create(instance *computev1alpha1.Workload, client kubernetes.Interface) (reconcile.Result, error) {
+func (r *Reconciler) _create(instance *computev1alpha1.Workload, remote client.Client) (reconcile.Result, error) {
+	log.V(1).Info("creating workload")
+
+	if !util.HasFinalizer(&instance.ObjectMeta, finalizer) {
+		util.AddFinalizer(&instance.ObjectMeta, finalizer)
+		return resultDone, errors.Wrapf(r.Update(ctx, instance), "failed to update the object after adding finalizer")
+	}
+
 	instance.Status.SetCreating()
-	util.AddFinalizer(&instance.ObjectMeta, finalizer)
 
 	// create target namespace
 	targetNamespace := instance.Spec.TargetNamespace
 
-	_, err := client.CoreV1().Namespaces().Create(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: targetNamespace}})
-	if err != nil && !errors.IsAlreadyExists(err) {
+	if err := remote.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: targetNamespace}}); err != nil && !kerrors.IsAlreadyExists(err) {
 		return r.fail(instance, errorCreating, err.Error())
 	}
 
@@ -296,89 +410,234 @@ func (r *Reconciler) _create(instance *computev1alpha1.Workload, client kubernet
 			Namespace: targetNamespace,
 		}
 		addWorkloadReferenceLabel(&sec.ObjectMeta, uid)
-		_, err = util.ApplySecret(client, sec)
-		if err != nil {
+		if err := util.Apply(ctx, remote, sec); err != nil {
 			return r.fail(instance, errorCreating, err.Error())
 		}
 	}
 
-	// propagate deployment
-	d, err := r.propagateDeployment(client, instance.Spec.TargetDeployment, targetNamespace, uid)
-	if err != nil {
+	var err error
+	trefs := &instance.Status.TargetReferences
+
+	// propagate crds
+	if trefs.CRDs, err = r.propagateCRDs(remote, instance.Spec.TargetCRDs, targetNamespace, uid); err != nil {
 		return r.fail(instance, errorCreating, err.Error())
 	}
-	instance.Status.Deployment = util.ObjectReference(d.ObjectMeta, d.APIVersion, d.Kind)
+
+	// propagate crs
+	if trefs.CRs, err = r.propagateCRs(remote, instance.Spec.TargetCRs, targetNamespace, uid); err != nil {
+		return r.fail(instance, errorCreating, err.Error())
+	}
+
+	// propagate service accounts
+	if trefs.SAs, err = r.propagateServiceAccounts(remote, instance.Spec.TargetServiceAccounts, targetNamespace, uid); err != nil {
+		return r.fail(instance, errorCreating, err.Error())
+	}
+
+	// propagate cluster roles
+	if trefs.ClusterRoles, err = r.propagateClusterRoles(remote, instance.Spec.TargetClusterRoles, targetNamespace, uid); err != nil {
+		return r.fail(instance, errorCreating, err.Error())
+	}
+
+	// propagate cluster role bindings
+	if trefs.ClusterRoleBindings, err = r.propagateClusterRoleBindings(remote, instance.Spec.TargetClusterRoleBindings, targetNamespace, uid); err != nil {
+		return r.fail(instance, errorCreating, err.Error())
+	}
+
+	// propagate deployment
+	if trefs.Deployments, err = r.propagateDeployments(remote, instance.Spec.TargetDeployments, targetNamespace, uid); err != nil {
+		return r.fail(instance, errorCreating, err.Error())
+	}
 
 	// propagate service
-	s, err := r.propagateService(client, instance.Spec.TargetService, targetNamespace, uid)
-	if err != nil {
+	if trefs.Services, err = r.propagateServices(remote, instance.Spec.TargetServices, targetNamespace, uid); err != nil {
 		return r.fail(instance, errorCreating, err.Error())
 	}
-	instance.Status.Service = util.ObjectReference(s.ObjectMeta, s.APIVersion, s.Kind)
 
 	instance.Status.State = computev1alpha1.WorkloadStateCreating
-
+	err = r.Status().Update(ctx, instance)
 	// update instance
-	return resultDone, r.Status().Update(ctx, instance)
+	return resultDone, err
+}
+
+func syncCRDs(c client.Client, instance *computev1alpha1.Workload) ([]apiextensions.CustomResourceDefinitionStatus, error) {
+	var statuses []apiextensions.CustomResourceDefinitionStatus
+	for _, v := range instance.Status.TargetReferences.CRDs {
+		crd := &apiextensions.CustomResourceDefinition{}
+		nn := util.NamespaceNameFromObjectRef(&v)
+		if err := c.Get(ctx, nn, crd); err != nil {
+			return nil, errors.Wrapf(err, "failed to retrieve crd: %s", nn)
+		}
+		statuses = append(statuses, crd.Status)
+	}
+	return statuses, nil
+}
+
+func syncDeployments(c client.Client, instance *computev1alpha1.Workload) ([]appsv1.DeploymentStatus, error) {
+	var statuses []appsv1.DeploymentStatus
+	for _, v := range instance.Status.TargetReferences.Deployments {
+		i := &appsv1.Deployment{}
+		nn := util.NamespaceNameFromObjectRef(&v)
+		if err := c.Get(ctx, nn, i); err != nil {
+			return nil, errors.Wrapf(err, "failed to retrieve crd: %s", nn)
+		}
+		statuses = append(statuses, i.Status)
+	}
+	return statuses, nil
+}
+
+func syncServices(c client.Client, instance *computev1alpha1.Workload) ([]corev1.ServiceStatus, error) {
+	var statuses []corev1.ServiceStatus
+	for _, v := range instance.Status.TargetReferences.Deployments {
+		i := &corev1.Service{}
+		nn := util.NamespaceNameFromObjectRef(&v)
+		if err := c.Get(ctx, nn, i); err != nil {
+			return nil, errors.Wrapf(err, "failed to retrieve crd: %s", nn)
+		}
+		statuses = append(statuses, i.Status)
+	}
+	return statuses, nil
 }
 
 // _sync Workload status
-func (r *Reconciler) _sync(instance *computev1alpha1.Workload, client kubernetes.Interface) (reconcile.Result, error) {
-	ns := instance.Spec.TargetNamespace
-
-	s := instance.Spec.TargetService
-	ss, err := client.CoreV1().Services(ns).Get(s.Name, metav1.GetOptions{})
-	if err != nil {
-		return r.fail(instance, errorSynchronizing, err.Error())
+func (r *Reconciler) _sync(instance *computev1alpha1.Workload, c client.Client) (reconcile.Result, error) {
+	var first, err error
+	if instance.Status.TargetStatuses.CRDs, err = syncCRDs(c, instance); err != nil {
+		first = errors.Wrapf(err, "failed to sync crds")
 	}
-	instance.Status.ServiceStatus = ss.Status
 
-	d := instance.Spec.TargetDeployment
-	dd, err := client.AppsV1().Deployments(ns).Get(d.Name, metav1.GetOptions{})
-	if err != nil {
-		return r.fail(instance, errorSynchronizing, err.Error())
+	if instance.Status.TargetStatuses.Deployments, err = syncDeployments(c, instance); err != nil {
+		if first != nil {
+			first = errors.Wrapf(err, "failed to sync deployments")
+		}
 	}
-	instance.Status.DeploymentStatus = dd.Status
 
-	// TODO: decide how to better determine the workload status
-	if util.LatestDeploymentCondition(dd.Status.Conditions).Type == appsv1.DeploymentAvailable {
+	if instance.Status.TargetStatuses.Services, err = syncServices(c, instance); err != nil {
+		if first != nil {
+			first = errors.Wrapf(err, "failed to sync services")
+		}
+	}
+
+	if first != nil {
+		return resultDone, first
+	}
+
+	ready := true
+
+	for _, ds := range instance.Status.TargetStatuses.Deployments {
+		ready = ready && util.LatestDeploymentCondition(ds.Conditions).Type == appsv1.DeploymentAvailable
+	}
+
+	if ready {
 		instance.Status.State = computev1alpha1.WorkloadStateRunning
 		instance.Status.SetCondition(corev1alpha1.NewCondition(corev1alpha1.Ready, "", ""))
-		return resultDone, r.Status().Update(ctx, instance)
 	}
 
-	return resultRequeue, r.Status().Update(ctx, instance)
+	return resultDone, r.Status().Update(ctx, instance)
+}
+
+func deleteCRs(c client.Client, refs []corev1.ObjectReference) error {
+	for _, ref := range refs {
+		obj := &unstructured.Unstructured{}
+		obj.SetName(ref.Name)
+		obj.SetNamespace(ref.Namespace)
+		if err := c.Delete(ctx, obj); err != nil {
+			return errors.Wrapf(err, "failed to delete custom resource: %v", obj)
+		}
+	}
+	return nil
+}
+
+func deleteCRDs(c client.Client, refs []corev1.ObjectReference) error {
+	for _, ref := range refs {
+		meta := newMetaFromObjectReference(ref)
+		if err := c.Delete(ctx, &apiextensions.CustomResourceDefinition{ObjectMeta: meta}); err != nil && !kerrors.IsNotFound(err) {
+			return errors.Wrapf(err, "failed to delete crd: %v", meta)
+		}
+	}
+	return nil
+}
+
+func deleteServiceAccount(c client.Client, refs []corev1.ObjectReference) error {
+	for _, ref := range refs {
+		meta := newMetaFromObjectReference(ref)
+		if err := c.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: meta}); err != nil && !kerrors.IsNotFound(err) {
+			return errors.Wrapf(err, "failed to delete service account: %v", meta)
+		}
+	}
+	return nil
+}
+
+func deleteClusterRole(c client.Client, refs []corev1.ObjectReference) error {
+	for _, ref := range refs {
+		meta := newMetaFromObjectReference(ref)
+		if err := c.Delete(ctx, &v1beta1.ClusterRole{ObjectMeta: meta}); err != nil && !kerrors.IsNotFound(err) {
+			return errors.Wrapf(err, "failed to delete cluster role: %v", meta)
+		}
+	}
+	return nil
+}
+
+func deleteClusterRoleBindings(c client.Client, refs []corev1.ObjectReference) error {
+	for _, ref := range refs {
+		meta := newMetaFromObjectReference(ref)
+		if err := c.Delete(ctx, &v1beta1.ClusterRoleBinding{ObjectMeta: meta}); err != nil && !kerrors.IsNotFound(err) {
+			return errors.Wrapf(err, "failed to delete cluster role binding: %v", meta)
+		}
+	}
+	return nil
+}
+
+func deleteDeployments(c client.Client, refs []corev1.ObjectReference) error {
+	for _, ref := range refs {
+		meta := newMetaFromObjectReference(ref)
+		if err := c.Delete(ctx, &appsv1.Deployment{ObjectMeta: meta}); err != nil && !kerrors.IsNotFound(err) {
+			return errors.Wrapf(err, "failed to delete deployment: %v", meta)
+		}
+	}
+	return nil
+}
+
+func deleteServices(c client.Client, refs []corev1.ObjectReference) error {
+	for _, ref := range refs {
+		meta := newMetaFromObjectReference(ref)
+		if err := c.Delete(ctx, &corev1.Service{ObjectMeta: meta}); err != nil && !kerrors.IsNotFound(err) {
+			return errors.Wrapf(err, "failed to delete service: %v", meta)
+		}
+	}
+	return nil
 }
 
 // _delete workload
-func (r *Reconciler) _delete(instance *computev1alpha1.Workload, client kubernetes.Interface) (reconcile.Result, error) {
-	ns := instance.Spec.TargetNamespace
-
-	// delete service
-	if s := instance.Status.Service; s != nil {
-		if err := client.CoreV1().Services(s.Namespace).Delete(s.Name, &metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			return r.fail(instance, errorDeleting, err.Error())
-		}
+func (r *Reconciler) _delete(instance *computev1alpha1.Workload, c client.Client) (reconcile.Result, error) {
+	if err := deleteServices(c, instance.Status.TargetReferences.Services); err != nil {
+		return resultDone, errors.Wrapf(err, "failed to delete services")
 	}
-
-	// delete deployment
-	if d := instance.Status.Deployment; d != nil {
-		if err := client.AppsV1().Deployments(d.Namespace).Delete(d.Name, &metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			return r.fail(instance, errorDeleting, err.Error())
-		}
+	if err := deleteDeployments(c, instance.Status.TargetReferences.Deployments); err != nil {
+		return resultDone, errors.Wrapf(err, "failed to delete deployments")
 	}
-
-	// delete resources secrets
-	for _, resource := range instance.Spec.Resources {
-		secretName := util.IfEmptyString(resource.SecretName, resource.Name)
-		if err := client.CoreV1().Secrets(ns).Delete(secretName, &metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			return r.fail(instance, errorDeleting, err.Error())
-		}
+	if err := deleteServiceAccount(c, instance.Status.TargetReferences.SAs); err != nil {
+		return resultDone, errors.Wrapf(err, "failed to delete service accounts")
+	}
+	if err := deleteClusterRoleBindings(c, instance.Status.TargetReferences.ClusterRoleBindings); err != nil {
+		return resultDone, errors.Wrapf(err, "failed to delete cluster role bindings")
+	}
+	if err := deleteClusterRole(c, instance.Status.TargetReferences.ClusterRoles); err != nil {
+		return resultDone, errors.Wrapf(err, "failed to delete cluster roles")
+	}
+	if err := deleteCRs(c, instance.Status.TargetReferences.CRs); err != nil {
+		return resultDone, errors.Wrapf(err, "failed to delete custom resources")
+	}
+	if err := deleteCRDs(c, instance.Status.TargetReferences.CRDs); err != nil {
+		return resultDone, errors.Wrapf(err, "failed to delete crds")
 	}
 
 	instance.Status.SetCondition(corev1alpha1.NewCondition(corev1alpha1.Deleting, "", ""))
+	if err := r.Status().Update(ctx, instance); err != nil {
+		return resultDone, errors.Wrapf(err, "failed to updated status")
+	}
+
 	util.RemoveFinalizer(&instance.ObjectMeta, finalizer)
-	return resultDone, r.Status().Update(ctx, instance)
+	return resultDone, r.Update(ctx, instance)
 }
 
 // Reconcile reads that state of the cluster for a Instance object and makes changes based on the state read
@@ -387,10 +646,11 @@ func (r *Reconciler) Reconcile(request reconcile.Request) (reconcile.Result, err
 	log.V(logging.Debug).Info("reconciling", "kind", computev1alpha1.WorkloadKindAPIVersion, "request", request)
 	// fetch the CRD instance
 	instance := &computev1alpha1.Workload{}
+	instance.GetNamespace()
 
 	err := r.Get(ctx, request.NamespacedName, instance)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
 			return resultDone, nil
@@ -409,7 +669,7 @@ func (r *Reconciler) Reconcile(request reconcile.Request) (reconcile.Result, err
 	}
 
 	// Check for deletion
-	if instance.DeletionTimestamp != nil && instance.Status.Condition(corev1alpha1.Deleting) == nil {
+	if instance.DeletionTimestamp != nil {
 		return r.delete(instance, targetClient)
 	}
 
@@ -418,4 +678,22 @@ func (r *Reconciler) Reconcile(request reconcile.Request) (reconcile.Result, err
 	}
 
 	return r.sync(instance, targetClient)
+}
+
+func newObjectReference(t metav1.TypeMeta, o metav1.ObjectMeta, kind, apiversion string) corev1.ObjectReference {
+	return corev1.ObjectReference{
+		Kind:            util.IfEmptyString(t.Kind, kind),
+		APIVersion:      util.IfEmptyString(t.APIVersion, apiversion),
+		Namespace:       o.Namespace,
+		Name:            o.Name,
+		UID:             o.UID,
+		ResourceVersion: o.ResourceVersion,
+	}
+}
+
+func newMetaFromObjectReference(ref corev1.ObjectReference) metav1.ObjectMeta {
+	return metav1.ObjectMeta{
+		Namespace: ref.Namespace,
+		Name:      ref.Name,
+	}
 }

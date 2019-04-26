@@ -17,12 +17,14 @@ limitations under the License.
 package v1alpha1
 
 import (
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	corev1alpha1 "github.com/crossplaneio/crossplane/pkg/apis/core/v1alpha1"
 	"github.com/crossplaneio/crossplane/pkg/util"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/api/rbac/v1beta1"
+	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // KubernetesClusterSpec specifies the configuration of a Kubernetes cluster.
@@ -126,24 +128,47 @@ const (
 type WorkloadSpec struct {
 	ClusterSelector map[string]string `json:"clusterSelector,omitempty"`
 
-	TargetNamespace  string             `json:"targetNamespace"`
-	TargetDeployment *appsv1.Deployment `json:"targetDeployment"`
-	TargetService    *corev1.Service    `json:"targetService"`
+	TargetNamespace           string                            `json:"targetNamespace"`
+	TargetCRDs                []apiext.CustomResourceDefinition `json:"targetCrds,omitempty"`
+	TargetCRs                 []unstructured.Unstructured       `json:"targetCrs,omitempty"`
+	TargetServiceAccounts     []corev1.ServiceAccount           `json:"targetServiceAccounts,omitempty"`
+	TargetClusterRoles        []v1beta1.ClusterRole             `json:"targetClusterRoles,omitempty"`
+	TargetClusterRoleBindings []v1beta1.ClusterRoleBinding      `json:"targetClusterRoleBindings,omitempty"`
+	TargetRoles               []v1beta1.Role                    `json:"targetRoles,omitempty"`
+	TargetRoleBindings        []v1beta1.RoleBinding             `json:"targetRoleBindings,omitempty"`
+	TargetDeployments         []appsv1.Deployment               `json:"targetDeployments,omitempty"`
+	TargetServices            []corev1.Service                  `json:"targetServices,omitempty"`
 
 	// Resources
 	Resources []ResourceReference `json:"resources,omitempty"`
+}
+
+type WorkloadStatusObjectReferences struct {
+	// CRDs
+	CRDs                []corev1.ObjectReference `json:"crds,omitempty"`
+	CRs                 []corev1.ObjectReference `json:"crs,omitempty"`
+	SAs                 []corev1.ObjectReference `json:"serviceAccounts,omitempty"`
+	ClusterRoles        []corev1.ObjectReference `json:"clusterRoles,omitempty"`
+	ClusterRoleBindings []corev1.ObjectReference `json:"clusterRoleBindings,omitempty"`
+	Deployments         []corev1.ObjectReference `json:"deployments,omitempty"`
+	Services            []corev1.ObjectReference `json:"services,omitempty"`
+}
+
+type WorkloadStatusObjectStatuts struct {
+	CRDs        []apiext.CustomResourceDefinitionStatus `json:"crds,omitempty"`
+	Deployments []appsv1.DeploymentStatus               `json:"deployments,omitempty"`
+	Services    []corev1.ServiceStatus                  `json:"services,omitempty"`
 }
 
 // WorkloadStatus represents the status of a workload.
 type WorkloadStatus struct {
 	corev1alpha1.ConditionedStatus
 
-	Cluster                 *corev1.ObjectReference `json:"clusterRef,omitempty"`
-	appsv1.DeploymentStatus `json:"deployment,omitempty"`
-	corev1.ServiceStatus    `json:"service,omitempty"`
-	State                   WorkloadState           `json:"state,omitempty"`
-	Deployment              *corev1.ObjectReference `json:"deploymentRef,omitempty"`
-	Service                 *corev1.ObjectReference `json:"serviceRef,omitempty"`
+	Cluster *corev1.ObjectReference `json:"clusterRef,omitempty"`
+	State   WorkloadState           `json:"state,omitempty"`
+
+	TargetReferences WorkloadStatusObjectReferences `json:"targetReferences,omitempty"`
+	TargetStatuses   WorkloadStatusObjectStatuts    `json:"targetStatuses,omitempty"`
 }
 
 // +genclient

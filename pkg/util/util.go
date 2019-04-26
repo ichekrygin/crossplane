@@ -18,14 +18,17 @@ package util
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+
+	"github.com/pkg/errors"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/kubernetes"
@@ -85,7 +88,7 @@ func ObjectToOwnerReference(r *corev1.ObjectReference) *metav1.OwnerReference {
 func ApplySecret(c kubernetes.Interface, s *corev1.Secret) (*corev1.Secret, error) {
 	_, err := c.CoreV1().Secrets(s.Namespace).Get(s.Name, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			return c.CoreV1().Secrets(s.Namespace).Create(s)
 		}
 		return nil, err
@@ -98,7 +101,7 @@ func ApplySecret(c kubernetes.Interface, s *corev1.Secret) (*corev1.Secret, erro
 // existing object.
 func Apply(ctx context.Context, kube client.Client, o runtime.Object) error {
 	err := kube.Create(ctx, o)
-	if err != nil && errors.IsAlreadyExists(err) {
+	if err != nil && kerrors.IsAlreadyExists(err) {
 		return kube.Update(ctx, o)
 	}
 	return err
@@ -138,4 +141,22 @@ func IfEmptyString(s, r string) string {
 		return r
 	}
 	return s
+}
+
+func DeepCopyMap(src map[string]interface{}, dest map[string]interface{}) error {
+	if src == nil {
+		return errors.New("src is nil. You cannot read from a nil map")
+	}
+	if dest == nil {
+		return errors.New("dest is nil. You cannot insert to a nil map")
+	}
+	jsonStr, err := json.Marshal(src)
+	if err != nil {
+		return errors.Wrapf(err, "failed to write to json")
+	}
+	err = json.Unmarshal(jsonStr, &dest)
+	if err != nil {
+		return errors.Wrapf(err, "failed to read from json")
+	}
+	return nil
 }
