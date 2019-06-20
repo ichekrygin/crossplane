@@ -14,30 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package googleapi
-
-import (
-	"net/http"
-
-	"google.golang.org/api/googleapi"
-)
-
-// IsErrorNotFound returns true if error of type *googleapi.Error and
-// error Code = 404
-func IsErrorNotFound(err error) bool {
-	apiErr, ok := err.(*googleapi.Error)
-	if !ok {
-		return false
-	}
-	return apiErr.Code == http.StatusNotFound
-}
-
-// IsErrorConflict returns true if error of type *googleapi.Error and
-// error Code = 409
-func IsErrorConflict(err error) bool {
-	apiErr, ok := err.(*googleapi.Error)
-	if !ok {
-		return false
-	}
-	return apiErr.Code == http.StatusConflict
-}
+// Package v1alpha1 contains API Schema definitions for the database v1alpha1 API group
+// +k8s:openapi-gen=true
+// +k8s:deepcopy-gen=package,register
+// +k8s:conversion-gen=github.com/crossplaneio/crossplane/pkg/apis/gcp/cloudsql
+// +k8s:defaulter-gen=TypeMeta
+// +groupName=cloudsql.gcp.crossplane.io
+package v1alpha1

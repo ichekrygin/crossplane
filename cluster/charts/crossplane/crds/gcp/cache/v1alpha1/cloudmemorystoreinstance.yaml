@@ -127,8 +127,9 @@ spec:
                 strings.
               type: string
             instanceName:
-              description: InstanceName of the Cloud Memorystore instance. Does not
-                include the project and location (region) IDs. e.g. 'foo', not 'projects/fooproj/locations/us-foo1/instances/foo'
+              description: DatabaseInstanceName of the Cloud Memorystore instance.
+                Does not include the project and location (region) IDs. e.g. 'foo',
+                not 'projects/fooproj/locations/us-foo1/instances/foo'
               type: string
             message:
               type: string

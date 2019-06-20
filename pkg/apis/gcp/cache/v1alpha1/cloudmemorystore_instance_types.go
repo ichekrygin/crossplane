@@ -133,7 +133,7 @@ type CloudMemorystoreInstanceStatus struct {
 	// Port at which the Cloud Memorystore instance endpoint is listening.
 	Port int `json:"port,omitempty"`
 
-	// InstanceName of the Cloud Memorystore instance. Does not include the
+	// DatabaseInstanceName of the Cloud Memorystore instance. Does not include the
 	// project and location (region) IDs. e.g. 'foo', not
 	// 'projects/fooproj/locations/us-foo1/instances/foo'
 	InstanceName string `json:"instanceName,omitempty"`

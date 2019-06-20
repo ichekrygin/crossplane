@@ -18,6 +18,7 @@ limitations under the License.
 package gcp
 
 import (
+	cloudsqlv1alpha1 "github.com/crossplaneio/crossplane/pkg/apis/gcp/cloudsql/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	cachev1alpha1 "github.com/crossplaneio/crossplane/pkg/apis/gcp/cache/v1alpha1"
@@ -35,6 +36,7 @@ func init() {
 		computev1alpha1.SchemeBuilder.AddToScheme,
 		databasev1alpha1.SchemeBuilder.AddToScheme,
 		storagev1alpha1.SchemeBuilder.AddToScheme,
+		cloudsqlv1alpha1.SchemeBuilder.AddToScheme,
 	)
 }
 

@@ -90,7 +90,7 @@ type RedisSpec struct {
 	// /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/Microsoft.{Network|ClassicNetwork}/VirtualNetworks/vnet1/subnets/subnet1
 	SubnetID string `json:"subnetId,omitempty"`
 
-	// RedisConfiguration specifies Redis Settings.
+	// RedisConfiguration specifies Redis settings.
 	RedisConfiguration map[string]string `json:"redisConfiguration,omitempty"`
 
 	// Kubernetes object references
@@ -150,7 +150,7 @@ type RedisStatus struct {
 	// RedisVersion the Redis endpoint is running.
 	RedisVersion string `json:"redisVersion,omitempty"`
 
-	// ResourceName of the Redis cache resource.
+	// DatabaseInstanceName of the Redis cache resource.
 	ResourceName string `json:"resourceName,omitempty"`
 }
 

@@ -62,7 +62,7 @@ spec:
                 after the deletion of this type
               type: string
             redisConfiguration:
-              description: RedisConfiguration specifies Redis Settings.
+              description: RedisConfiguration specifies Redis settings.
               type: object
             resourceGroupName:
               description: ResourceGroupName in which to create this resource.
@@ -137,7 +137,7 @@ spec:
               description: RedisVersion the Redis endpoint is running.
               type: string
             resourceName:
-              description: ResourceName of the Redis cache resource.
+              description: DatabaseInstanceName of the Redis cache resource.
               type: string
             sslPort:
               description: SSLPort at which the Redis endpoint is listening.

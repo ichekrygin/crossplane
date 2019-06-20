@@ -14,30 +14,5 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package googleapi
-
-import (
-	"net/http"
-
-	"google.golang.org/api/googleapi"
-)
-
-// IsErrorNotFound returns true if error of type *googleapi.Error and
-// error Code = 404
-func IsErrorNotFound(err error) bool {
-	apiErr, ok := err.(*googleapi.Error)
-	if !ok {
-		return false
-	}
-	return apiErr.Code == http.StatusNotFound
-}
-
-// IsErrorConflict returns true if error of type *googleapi.Error and
-// error Code = 409
-func IsErrorConflict(err error) bool {
-	apiErr, ok := err.(*googleapi.Error)
-	if !ok {
-		return false
-	}
-	return apiErr.Code == http.StatusConflict
-}
+// Package database contains GCP database API versions
+package cloudsql

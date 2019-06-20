@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -195,12 +196,13 @@ func Available() Condition {
 // currently available for use. Unavailable should be set only when Crossplane
 // expects the managed resource to be available but knows it is not, for example
 // because its API reports it is unhealthy.
-func Unavailable() Condition {
+func Unavailable(msg ...string) Condition {
 	return Condition{
 		Type:               TypeReady,
 		Status:             corev1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonUnavailable,
+		Message:            strings.Join(msg, "."),
 	}
 }
 
